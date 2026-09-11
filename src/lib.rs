@@ -26,6 +26,9 @@
 //! `msmq://<host>/<queue>`, the queue's HTTP URL
 //! `http://<host>/msmq/<queue>`, or MSMQ's own format name for it,
 //! `DIRECT=HTTP://<host>/msmq/<queue>`.
+//!
+//! The transport is its own far end (ADR-0051): [`Loopback`] stands the
+//! queue's HTTP end up on an ephemeral port and takes the one POST.
 
 pub mod envelope;
 pub mod mime;
@@ -38,6 +41,7 @@ pub use envelope::Envelope;
 use http::message::{self, Request, Response};
 pub use mime::Part;
 use transport::error::{Result, TransportError, protocol_error};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Directions, Transport, socket};
 
 /// The most one MSMQ message carries: four mebibytes.
@@ -246,6 +250,62 @@ impl Transport for MsmqTransport {
     }
 }
 
+impl MsmqTransport {
+    /// Both ends on this machine: the queue's HTTP end on an ephemeral
+    /// local port, the loopback timeout on both sides.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new("127.0.0.1:0", "far").timing_out_after(LOOPBACK_TIMEOUT)
+    }
+
+    /// This transport's configuration in a fresh instance signing as
+    /// `host` — its own message counter, as another node has.
+    fn sibling(&self, host: &str) -> Self {
+        let sibling = Self::new(self.bind.as_str(), host);
+        match self.timeout {
+            Some(timeout) => sibling.timing_out_after(timeout),
+            None => sibling,
+        }
+    }
+}
+
+/// A bound listener waiting for its one POST.
+struct Listening {
+    transport: MsmqTransport,
+    listener: TcpListener,
+    address: String,
+}
+
+impl FarEnd for Listening {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        self.transport.accept_one(&self.listener)
+    }
+}
+
+impl Loopback for MsmqTransport {
+    fn ceiling(&self) -> Option<usize> {
+        Some(ceiling())
+    }
+
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (listener, address) = self.bind()?;
+        Ok(Box::new(Listening {
+            transport: self.sibling(&self.host),
+            listener,
+            address,
+        }))
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        self.sibling("near")
+            .send(&format!("msmq://{address}/pingpong"), payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +391,47 @@ mod tests {
         assert_eq!(near.name(), "msmq");
         assert_eq!(near.directions(), Directions::BOTH);
         assert!(near.claims().is_none(), "the receipt is the 200");
+    }
+
+    /// The payloads an attachment must carry whole, and one at the brim.
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+            ("the brim", vec![b'm'; ceiling()]),
+        ]
+    }
+
+    #[test]
+    fn a_loopback_round_posts_one_message_and_takes_it_at_the_queue() {
+        let msmq = MsmqTransport::loopback();
+        let arrived = msmq.round(b"\x00order\r\n\xff").expect("round");
+        assert_eq!(arrived.bytes, b"\x00order\r\n\xff");
+        assert!(arrived.origin_uri.starts_with("msmq://127.0.0.1:"));
+        assert!(
+            arrived.origin_uri.ends_with("/pingpong#uuid:1@near"),
+            "{}",
+            arrived.origin_uri
+        );
+        assert_eq!(msmq.name(), "msmq");
+        assert!(msmq.refuses(&[0, 0xff]).is_none(), "bytes are bytes");
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edge_payloads_whole_and_refuses_over_the_brim() {
+        let msmq = MsmqTransport::loopback();
+        assert_eq!(msmq.ceiling(), Some(4 * 1024 * 1024));
+        for (name, payload) in edge_payloads() {
+            let arrived = msmq.round(&payload).expect(name);
+            assert_eq!(arrived.bytes, payload, "{name}");
+        }
+        let over = vec![b'm'; ceiling() + 1];
+        let failure = msmq.round(&over).expect_err("over the brim");
+        assert!(failure.message.starts_with("send failed:"), "{failure}");
+        assert!(failure.message.contains("4194304"), "{failure}");
     }
 }
