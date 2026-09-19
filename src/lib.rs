@@ -302,7 +302,7 @@ impl Loopback for MsmqTransport {
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
         self.sibling("near")
-            .send(&format!("msmq://{address}/pingpong"), payload)
+            .send(&format!("msmq://{address}/round-trip"), payload)
     }
 }
 
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(arrived.bytes, b"\x00order\r\n\xff");
         assert!(arrived.origin_uri.starts_with("msmq://127.0.0.1:"));
         assert!(
-            arrived.origin_uri.ends_with("/pingpong#uuid:1@near"),
+            arrived.origin_uri.ends_with("/round-trip#uuid:1@near"),
             "{}",
             arrived.origin_uri
         );
