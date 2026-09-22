@@ -8,8 +8,9 @@
 //! flat scan the capability's `xml.rs` is (ADR-0044); a queue reads four
 //! elements out of it and never needs a tree.
 
+use codec::xml::escape;
 use transport::error::{Result, protocol_error};
-use transport::xml::{escape, first};
+use transport::xml::first;
 
 /// The SOAP envelope namespace, as SRMP fixes it.
 pub const SOAP: &str = "http://schemas.xmlsoap.org/soap/envelope/";
@@ -96,7 +97,7 @@ pub fn parse(xml: &str) -> Result<Envelope> {
     if !xml.contains("<se:Envelope") && !xml.contains(":Envelope") {
         return Err(protocol_error("not a SOAP envelope"));
     }
-    match first(xml, "action") {
+    match first(xml, "action")? {
         Some(action) if action == ACTION => {}
         Some(action) => {
             return Err(protocol_error(format!(
@@ -105,27 +106,28 @@ pub fn parse(xml: &str) -> Result<Envelope> {
         }
         None => return Err(protocol_error("an envelope with no path header")),
     }
-    let to = first(xml, "to").ok_or_else(|| protocol_error("an envelope with no destination"))?;
-    let id = first(xml, "id").ok_or_else(|| protocol_error("an envelope with no message id"))?;
+    let to = first(xml, "to")?.ok_or_else(|| protocol_error("an envelope with no destination"))?;
+    let id = first(xml, "id")?.ok_or_else(|| protocol_error("an envelope with no message id"))?;
     let body_id = xml
         .split("href=\"cid:")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
-        .map(transport::xml::unescape)
+        .map(codec::xml::unescape)
+        .transpose()?
         .ok_or_else(|| protocol_error("a body that names no attachment"))?;
     Ok(Envelope {
         id,
         to,
         body_id,
-        sent_at: number(xml, "sentAt"),
-        expires_at: number(xml, "expiresAt"),
+        sent_at: number(xml, "sentAt")?,
+        expires_at: number(xml, "expiresAt")?,
     })
 }
 
-fn number(xml: &str, name: &str) -> u64 {
-    first(xml, name)
+fn number(xml: &str, name: &str) -> Result<u64> {
+    Ok(first(xml, name)?
         .and_then(|text| text.parse().ok())
-        .unwrap_or(0)
+        .unwrap_or(0))
 }
 
 #[cfg(test)]
