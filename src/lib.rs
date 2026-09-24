@@ -43,8 +43,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use envelope::Envelope;
 use http::message::{self, Request, Response};
-pub use mime::Part;
+use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
+use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Directions, Transport, socket};
 
@@ -121,28 +122,18 @@ impl MsmqTransport {
     /// # Errors
     /// Where the Stream is over the [`ceiling`].
     pub fn compose(&self, url: &str, bytes: &[u8]) -> Result<Request> {
-        if bytes.len() > ceiling() {
-            return Err(TransportError::permanent(format!(
-                "{} bytes is over the {} one MSMQ message carries",
-                bytes.len(),
-                ceiling()
-            )));
-        }
+        ceiling::within(bytes.len(), ceiling(), "one MSMQ message carries")?;
         let n = self.next.fetch_add(1, Ordering::Relaxed);
         let id = format!("uuid:{n}@{}", self.host);
         let body_id = format!("body{n}@{}", self.host);
         let envelope = Envelope::new(&id, url, &body_id, now());
         let parts = [
-            Part {
-                content_type: "text/xml".to_string(),
-                content_id: format!("envelope{n}@{}", self.host),
-                bytes: envelope::compose(&envelope).into_bytes(),
-            },
-            Part {
-                content_type: "application/octet-stream".to_string(),
-                content_id: body_id,
-                bytes: bytes.to_vec(),
-            },
+            mime::part(
+                "text/xml",
+                &format!("envelope{n}@{}", self.host),
+                envelope::compose(&envelope).as_bytes(),
+            ),
+            mime::part("application/octet-stream", &body_id, bytes),
         ];
         let target = http::target::HttpTarget::parse(url)?;
         Ok(Request::new("POST", target.path)
@@ -150,7 +141,7 @@ impl MsmqTransport {
             .header("Content-Type", &mime::content_type(BOUNDARY))
             .header("SOAPAction", "\"MSMQMessage\"")
             .header("Proxy-Accept", "NonInteractiveClient")
-            .body(&mime::compose(BOUNDARY, &parts)))
+            .body(&codec::mime::write(BOUNDARY, &parts)))
     }
 }
 
@@ -173,19 +164,19 @@ pub fn take(request: &Request) -> Result<Arrived> {
         .filter(|queue| !queue.is_empty())
         .ok_or_else(|| protocol_error(format!("{:?} is not /msmq/<queue>", request.path)))?;
     let boundary = mime::boundary_of(request.header_value("Content-Type").unwrap_or_default())?;
-    let parts = mime::parse(&boundary, &request.body)?;
+    let parts = mime::parts(boundary, &request.body)?;
     let first = parts
         .first()
         .ok_or_else(|| protocol_error("a message with no envelope"))?;
-    let envelope = envelope::parse(&String::from_utf8_lossy(&first.bytes))?;
+    let envelope = envelope::parse(&String::from_utf8_lossy(&first.body))?;
     let body = parts
         .iter()
-        .find(|part| part.content_id == envelope.body_id)
+        .find(|part| part.content_id() == Some(envelope.body_id.as_str()))
         .ok_or_else(|| protocol_error(format!("no attachment {:?}", envelope.body_id)))?;
     let host = request.header_value("Host").unwrap_or("localhost");
     Ok(Arrived::new(
         format!("msmq://{host}/{queue}#{}", envelope.id),
-        body.bytes.clone(),
+        body.body.clone(),
     ))
 }
 
@@ -291,35 +282,17 @@ impl MsmqTransport {
     }
 }
 
-/// A bound listener waiting for its one POST.
-struct Listening {
-    transport: MsmqTransport,
-    listener: TcpListener,
-    address: String,
-}
-
-impl FarEnd for Listening {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        self.transport.accept_one(&self.listener)
-    }
-}
-
 impl Loopback for MsmqTransport {
     fn ceiling(&self) -> Option<usize> {
         Some(ceiling())
     }
 
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening {
-            transport: self.sibling(&self.host),
-            listener,
-            address,
-        }))
+        let transport = self.sibling(&self.host);
+        Ok(Box::new(Listening::new(
+            move |listener: &TcpListener| transport.accept_one(listener),
+            self.bind()?,
+        )))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
