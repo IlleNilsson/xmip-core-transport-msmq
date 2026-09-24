@@ -5,17 +5,13 @@
 //! `type="text/xml"`, its first part the SOAP envelope, each further part
 //! a binary attachment with a `Content-Id` the envelope refers to by
 //! `cid:`. The attachment is `application/octet-stream` and travels as the
-//! bytes it is, so what the queue hands on is exactly the Stream.
+//! bytes it is, so what the queue hands on is exactly the Stream. The
+//! multipart body itself is `codec::mime`'s, the estate's one; until
+//! 2026-09-24 this file wrote and read its own, and took a boundary in the
+//! middle of a line for a delimiter.
 
+use codec::mime::{self, Part};
 use transport::error::{Result, protocol_error};
-
-/// One part of a multipart body: its headers and its bytes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Part {
-    pub content_type: String,
-    pub content_id: String,
-    pub bytes: Vec<u8>,
-}
 
 /// The `Content-Type` an SRMP message travels under, with `boundary`.
 #[must_use]
@@ -23,112 +19,36 @@ pub fn content_type(boundary: &str) -> String {
     format!("multipart/related; boundary=\"{boundary}\"; type=\"text/xml\"")
 }
 
+/// One part as SRMP writes it: its type, its content id and its length.
+#[must_use]
+pub fn part(content_type: &str, content_id: &str, bytes: &[u8]) -> Part {
+    Part::new(bytes)
+        .header("Content-Type", content_type)
+        .header("Content-Id", &format!("<{content_id}>"))
+        .header("Content-Length", &bytes.len().to_string())
+}
+
 /// The boundary a `Content-Type` names, or the refusal.
 ///
 /// # Errors
 /// Where the type is not `multipart/related` or names no boundary.
-pub fn boundary_of(content_type: &str) -> Result<String> {
-    let mut parts = content_type.split(';').map(str::trim);
-    if !parts
-        .next()
-        .is_some_and(|kind| kind.eq_ignore_ascii_case("multipart/related"))
-    {
+pub fn boundary_of(content_type: &str) -> Result<&str> {
+    if mime::media_type(content_type) != "multipart/related" {
         return Err(protocol_error(format!(
             "an SRMP message is multipart/related, not {content_type:?}"
         )));
     }
-    parts
-        .find_map(|parameter| {
-            let (name, value) = parameter.split_once('=')?;
-            name.trim()
-                .eq_ignore_ascii_case("boundary")
-                .then(|| value.trim().trim_matches('"').to_string())
-        })
+    mime::parameter(content_type, "boundary")
         .filter(|boundary| !boundary.is_empty())
         .ok_or_else(|| protocol_error("a multipart type naming no boundary"))
 }
 
-/// `parts` as one multipart body under `boundary`.
-#[must_use]
-pub fn compose(boundary: &str, parts: &[Part]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for part in parts {
-        out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        out.extend_from_slice(
-            format!(
-                "Content-Type: {}\r\nContent-Id: <{}>\r\nContent-Length: {}\r\n\r\n",
-                part.content_type,
-                part.content_id,
-                part.bytes.len()
-            )
-            .as_bytes(),
-        );
-        out.extend_from_slice(&part.bytes);
-        out.extend_from_slice(b"\r\n");
-    }
-    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    out
-}
-
-/// The parts of a multipart body under `boundary`.
+/// The parts of an SRMP body under `boundary`.
 ///
 /// # Errors
-/// Where a part has no header block, or the body does not close.
-pub fn parse(boundary: &str, body: &[u8]) -> Result<Vec<Part>> {
-    let open = format!("--{boundary}");
-    let mut parts = Vec::new();
-    let mut at = find(body, 0, open.as_bytes())
-        .ok_or_else(|| protocol_error("a multipart body with no first boundary"))?;
-    loop {
-        at += open.len();
-        if body[at..].starts_with(b"--") {
-            return Ok(parts);
-        }
-        let head_start = at + skip_eol(&body[at..]);
-        let head_end = find(body, head_start, b"\r\n\r\n")
-            .ok_or_else(|| protocol_error("a part with no header block"))?;
-        let head = String::from_utf8_lossy(&body[head_start..head_end]).to_string();
-        let content_start = head_end + 4;
-        let next = find(body, content_start, open.as_bytes())
-            .ok_or_else(|| protocol_error("a multipart body that does not close"))?;
-        let mut content_end = next;
-        if body[..content_end].ends_with(b"\r\n") {
-            content_end -= 2;
-        }
-        parts.push(Part {
-            content_type: header(&head, "Content-Type").unwrap_or_default(),
-            content_id: header(&head, "Content-Id")
-                .map(|id| id.trim_matches(|c| c == '<' || c == '>').to_string())
-                .unwrap_or_default(),
-            bytes: body[content_start..content_end].to_vec(),
-        });
-        at = next;
-    }
-}
-
-fn find(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
-    haystack
-        .get(from..)?
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map(|at| at + from)
-}
-
-fn skip_eol(bytes: &[u8]) -> usize {
-    if bytes.starts_with(b"\r\n") {
-        2
-    } else {
-        usize::from(bytes.starts_with(b"\n"))
-    }
-}
-
-fn header(head: &str, name: &str) -> Option<String> {
-    head.lines().find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_string())
-    })
+/// Where the body is not the multipart its boundary says.
+pub fn parts(boundary: &str, body: &[u8]) -> Result<Vec<Part>> {
+    mime::read(body, boundary).map_err(|refusal| protocol_error(refusal.to_string()))
 }
 
 #[cfg(test)]
@@ -136,26 +56,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_composed_body_parses_back_with_binary_attachments_whole() {
-        let parts = vec![
-            Part {
-                content_type: "text/xml".into(),
-                content_id: "envelope".into(),
-                bytes: b"<se:Envelope/>".to_vec(),
-            },
-            Part {
-                content_type: "application/octet-stream".into(),
-                content_id: "body@xmip".into(),
-                bytes: b"\r\n--x\r\n\x00\xff".to_vec(),
-            },
-            Part {
-                content_type: "application/octet-stream".into(),
-                content_id: "empty".into(),
-                bytes: Vec::new(),
-            },
+    fn a_written_body_parses_back_with_binary_attachments_whole() {
+        let written = vec![
+            part("text/xml", "envelope", b"<se:Envelope/>"),
+            part(
+                "application/octet-stream",
+                "body@xmip",
+                b"\r\n--x\r\n\x00\xff",
+            ),
+            part("application/octet-stream", "empty", b""),
         ];
-        let body = compose("MSMQ_BOUNDARY", &parts);
-        assert_eq!(parse("MSMQ_BOUNDARY", &body).expect("parsing"), parts);
+        let body = mime::write("MSMQ - SOAP boundary, 12345", &written);
+        let back = parts("MSMQ - SOAP boundary, 12345", &body).expect("parsing");
+        assert_eq!(back, written);
+        assert_eq!(back[1].content_id(), Some("body@xmip"));
+        assert_eq!(back[1].header_value("content-length"), Some("9"));
     }
 
     #[test]
@@ -167,7 +82,7 @@ mod tests {
         );
         assert!(!boundary_of("text/xml").expect_err("wrong").retryable);
         assert!(boundary_of("multipart/related").is_err());
-        assert!(parse("b", b"no boundary here").is_err());
-        assert!(parse("b", b"--b\r\nContent-Type: x\r\n\r\nnever closes").is_err());
+        assert!(parts("b", b"no boundary here").is_err());
+        assert!(parts("b", b"--b\r\nContent-Type: x\r\n\r\nnever closes").is_err());
     }
 }
