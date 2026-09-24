@@ -28,7 +28,8 @@ pub const ACTION: &str = "MSMQ:default";
 pub struct Envelope {
     /// The message id, `uuid:<n>@<host>` as MSMQ forms it.
     pub id: String,
-    /// The destination queue as a URL, `http://<host>/msmq/<queue>`.
+    /// The destination queue as a URL, `http://<host>/msmq/<queue>` or its
+    /// `https://` form.
     pub to: String,
     /// The attachment the body travels as, its `Content-Id`.
     pub body_id: String,

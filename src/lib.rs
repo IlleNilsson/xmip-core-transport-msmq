@@ -25,7 +25,11 @@
 //! `msmq://node-b/orders#uuid:7@node-a`. A send target is
 //! `msmq://<host>/<queue>`, the queue's HTTP URL
 //! `http://<host>/msmq/<queue>`, or MSMQ's own format name for it,
-//! `DIRECT=HTTP://<host>/msmq/<queue>`.
+//! `DIRECT=HTTP://<host>/msmq/<queue>`. Each has a guarded form —
+//! `msmqs://`, `https://`, `DIRECT=HTTPS://` — sent over HTTPS through the
+//! http technology's endpoint, as as2, as4 and webdav are; TLS is its `tls`
+//! feature (ADR-0033), and without it an https queue is refused rather
+//! than written in the clear.
 //!
 //! The transport is its own far end (ADR-0051): [`Loopback`] stands the
 //! queue's HTTP end up on an ephemeral port and takes the one POST.
@@ -186,28 +190,47 @@ pub fn take(request: &Request) -> Result<Arrived> {
 }
 
 /// The queue URL a target names: `msmq://host/queue`, `http://host/msmq/queue`
-/// or `DIRECT=HTTP://host/msmq/queue`, each as `http://host/msmq/queue`.
+/// or `DIRECT=HTTP://host/msmq/queue`, each as `http://host/msmq/queue`; and
+/// their guarded forms `msmqs://host/queue`, `https://host/msmq/queue` or
+/// `DIRECT=HTTPS://host/msmq/queue`, each as `https://host/msmq/queue`.
 ///
 /// # Errors
 /// Where the target names no host or no queue.
 pub fn queue_url(target: &str) -> Result<String> {
-    let (authority, queue) = if let Some(rest) = target.strip_prefix("msmq://") {
-        rest.split_once('/').unwrap_or((rest, ""))
+    let (scheme, authority, queue) = if let Some(rest) = target.strip_prefix("msmq://") {
+        let (authority, queue) = rest.split_once('/').unwrap_or((rest, ""));
+        ("http", authority, queue)
+    } else if let Some(rest) = target.strip_prefix("msmqs://") {
+        let (authority, queue) = rest.split_once('/').unwrap_or((rest, ""));
+        ("https", authority, queue)
     } else {
-        let stripped = target
-            .strip_prefix("DIRECT=HTTP://")
-            .or_else(|| target.strip_prefix("DIRECT=http://"))
-            .or_else(|| target.strip_prefix("http://"))
+        let (scheme, stripped) = http_form(target)
             .ok_or_else(|| protocol_error(format!("{target:?} is not an MSMQ queue")))?;
         let (authority, path) = stripped.split_once('/').unwrap_or((stripped, ""));
-        (authority, path.strip_prefix("msmq/").unwrap_or(""))
+        (scheme, authority, path.strip_prefix("msmq/").unwrap_or(""))
     };
     if authority.is_empty() || queue.is_empty() {
         return Err(protocol_error(format!(
             "{target:?} names no host and queue"
         )));
     }
-    Ok(format!("http://{authority}/msmq/{queue}"))
+    Ok(format!("{scheme}://{authority}/msmq/{queue}"))
+}
+
+/// The scheme and the rest of a target in the HTTP URL form or MSMQ's
+/// `DIRECT=` format name for it, the scheme in either case.
+fn http_form(target: &str) -> Option<(&'static str, &str)> {
+    let url = target
+        .get(..7)
+        .filter(|head| head.eq_ignore_ascii_case("DIRECT="))
+        .map_or(target, |_| &target[7..]);
+    [("https", "https://"), ("http", "http://")]
+        .into_iter()
+        .find_map(|(scheme, prefix)| {
+            url.get(..prefix.len())
+                .filter(|head| head.eq_ignore_ascii_case(prefix))
+                .map(|_| (scheme, &url[prefix.len()..]))
+        })
 }
 
 fn now() -> u64 {
@@ -235,9 +258,8 @@ impl Transport for MsmqTransport {
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let url = queue_url(target)?;
         let request = self.compose(&url, bytes)?;
-        let address = http::target::HttpTarget::parse(&url)?.address();
-        let stream = socket::connect_tcp(&address, self.timeout)?;
-        let response = message::exchange(stream, &request)?;
+        let connection = http::endpoint::connect(&url, self.timeout)?;
+        let response = message::exchange(connection, &request)?;
         if (200..300).contains(&response.status) {
             Ok(())
         } else {
@@ -372,6 +394,47 @@ mod tests {
             queue_url("http://node-b/orders").is_err(),
             "not under /msmq/"
         );
+    }
+
+    #[test]
+    fn a_guarded_target_is_written_as_https_in_each_of_the_three_forms() {
+        for target in [
+            "msmqs://node-b:8443/orders",
+            "https://node-b:8443/msmq/orders",
+            "DIRECT=HTTPS://node-b:8443/msmq/orders",
+            "direct=https://node-b:8443/msmq/orders",
+        ] {
+            assert_eq!(
+                queue_url(target).expect(target),
+                "https://node-b:8443/msmq/orders",
+                "{target}"
+            );
+        }
+        assert!(queue_url("msmqs://node-b").is_err(), "no queue");
+        let near = MsmqTransport::new("127.0.0.1:0", "node-a");
+        let request = near
+            .compose("https://node-b:8443/msmq/orders", b"fits")
+            .expect("composed");
+        assert_eq!(request.header_value("Host"), Some("node-b:8443"));
+        assert_eq!(request.path, "/msmq/orders");
+    }
+
+    #[test]
+    fn a_guarded_queue_is_carried_to_the_endpoint_rather_than_sent_in_the_clear() {
+        // A listener that accepts and never speaks: a TLS build reaches it
+        // and waits out a handshake, a build without TLS refuses https on
+        // the open socket rather than write the message in the clear.
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let near = MsmqTransport::new("127.0.0.1:0", "node-a").timing_out_after(secs(1));
+        let failure = near
+            .send(&format!("msmqs://{address}/orders"), b"<order/>")
+            .expect_err("no handshake");
+        drop(listener);
+        let refused = failure.message.contains("no tls feature");
+        #[cfg(feature = "tls")]
+        assert!(!refused, "{failure}");
+        #[cfg(not(feature = "tls"))]
+        assert!(refused, "{failure}");
     }
 
     #[test]
