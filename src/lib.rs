@@ -42,7 +42,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use envelope::Envelope;
-use http::message::{self, Request, Response};
+use http::server;
+use net::Endpoint;
+use net::http::{Request, Response};
 use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
@@ -100,21 +102,13 @@ impl MsmqTransport {
     /// Where the connection could not be accepted or read, or the request
     /// was not an SRMP message — which is answered `400` and refused.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
-        let (stream, _) = socket::accept_tcp(listener, self.timeout)?;
-        let (mut reader, mut writer) = socket::split(stream)?;
-        let request = message::read_request(&mut reader)?
-            .ok_or_else(|| protocol_error("a connection that sent no request"))?;
-        match take(&request) {
-            Ok(arrived) => {
-                message::write_response(&mut writer, &Response::new(200))?;
-                Ok(arrived)
-            }
+        server::serve_one(listener, self.timeout, |request| match take(request) {
+            Ok(arrived) => (Ok(arrived), Response::new(200)),
             Err(error) => {
                 let refusal = Response::new(400).body(error.message.as_bytes());
-                message::write_response(&mut writer, &refusal)?;
-                Err(error)
+                (Err(error), refusal)
             }
-        }
+        })?
     }
 
     /// The POST that carries `bytes` to the queue at `url`.
@@ -135,9 +129,9 @@ impl MsmqTransport {
             ),
             mime::part("application/octet-stream", &body_id, bytes),
         ];
-        let target = http::target::HttpTarget::parse(url)?;
-        Ok(Request::new("POST", target.path)
-            .header("Host", target.authority)
+        let endpoint = Endpoint::parse(url)?;
+        Ok(Request::new("POST", endpoint.path())
+            .header("Host", &endpoint.authority())
             .header("Content-Type", &mime::content_type(BOUNDARY))
             .header("SOAPAction", "\"MSMQMessage\"")
             .header("Proxy-Accept", "NonInteractiveClient")
@@ -249,8 +243,8 @@ impl Transport for MsmqTransport {
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let url = queue_url(target)?;
         let request = self.compose(&url, bytes)?;
-        let connection = http::endpoint::connect(&url, self.timeout)?;
-        let response = message::exchange(connection, &request)?;
+        let connection = http::endpoint::connect(&Endpoint::parse(&url)?, self.timeout)?;
+        let response = net::http::exchange(connection, &request)?;
         if (200..300).contains(&response.status) {
             Ok(())
         } else {
