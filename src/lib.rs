@@ -43,6 +43,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use envelope::Envelope;
 use http::endpoint::{Connections, Offer};
+use http::inbound::Inbound;
 use http::server;
 use net::Endpoint;
 use net::http::{Request, Response};
@@ -70,6 +71,20 @@ pub struct MsmqTransport {
     timeout: Option<Duration>,
     /// The connections kept to the queues' HTTP ends.
     connections: Connections,
+    /// The listener a Receive Location keeps, and senders' connections.
+    inbound: Inbound,
+}
+
+/// What one POST earns: the message it carries and `200`, or `400` and
+/// the refusal where it is not an SRMP message.
+fn answer(request: &Request) -> (Result<Arrived>, Response) {
+    match take(request) {
+        Ok(arrived) => (Ok(arrived), Response::new(200)),
+        Err(error) => {
+            let refusal = Response::new(400).body(error.message.as_bytes());
+            (Err(error), refusal)
+        }
+    }
 }
 
 impl MsmqTransport {
@@ -83,6 +98,7 @@ impl MsmqTransport {
             next: AtomicU64::new(1),
             timeout: None,
             connections: Connections::new(),
+            inbound: Inbound::new(),
         }
     }
 
@@ -108,13 +124,7 @@ impl MsmqTransport {
     /// Where the connection could not be accepted or read, or the request
     /// was not an SRMP message — which is answered `400` and refused.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
-        server::serve_one(listener, self.timeout, |request| match take(request) {
-            Ok(arrived) => (Ok(arrived), Response::new(200)),
-            Err(error) => {
-                let refusal = Response::new(400).body(error.message.as_bytes());
-                (Err(error), refusal)
-            }
-        })?
+        server::serve_one(listener, self.timeout, answer)?
     }
 
     /// The POST that carries `bytes` to the queue at `url`.
@@ -278,10 +288,13 @@ impl Transport for MsmqTransport {
         Directions::BOTH
     }
 
-    /// Bind, and take one message.
+    /// The next message from whichever sender posts first, on the listener
+    /// the first receive bound and the connections senders keep.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let (listener, _) = self.bind()?;
-        Ok(vec![self.accept_one(&listener)?])
+        let arrived =
+            self.inbound
+                .next(|| self.bind(), self.timeout, |request, _| answer(request))??;
+        Ok(vec![arrived])
     }
 
     /// POST the bytes as one message to the queue the target names.
@@ -370,6 +383,29 @@ mod tests {
             panic!("a Send Location signs as a host");
         };
         assert!(refused.message.contains("\"host\""), "{refused}");
+    }
+
+    #[test]
+    fn every_receive_takes_from_one_kept_listener_and_one_kept_connection() {
+        let queue = MsmqTransport::new("127.0.0.1:0", "node-b").timing_out_after(secs(2));
+        let address = queue.inbound.bound(|| queue.bind()).expect("bound");
+        let target = format!("msmq://{address}/orders");
+        let sender = std::thread::spawn(move || {
+            let near = MsmqTransport::new("127.0.0.1:0", "node-a").timing_out_after(secs(2));
+            for round in 0..5u8 {
+                near.send(&target, &[round]).expect("sent");
+            }
+            near.connections.opened()
+        });
+        for round in 0..5u8 {
+            assert_eq!(queue.receive().expect("received")[0].bytes, [round]);
+        }
+        assert_eq!(
+            sender.join().expect("sender"),
+            1,
+            "one connection for every send"
+        );
+        assert_eq!(queue.inbound.open(), 1);
     }
 
     #[test]
