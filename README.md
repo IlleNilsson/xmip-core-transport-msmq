@@ -13,6 +13,8 @@ which turns on `xmip-core-transport-http`'s and so the estate's one TLS stack,
 `xmip-core-library-tls` (ADR-0033). A build without it refuses an https queue
 rather than write the message in the clear.
 
+Requests go on connections kept between them (`http::endpoint::Connections`, offering HTTP/1.1): the transport holds them and hands them to every client it makes, so a call costs one exchange and not a connect, a TLS handshake and a `Connection: close`, as it did until 2026-09-27.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
