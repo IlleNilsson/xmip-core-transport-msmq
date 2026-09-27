@@ -45,11 +45,13 @@ pub use envelope::Envelope;
 use http::server;
 use net::Endpoint;
 use net::http::{Request, Response};
+use transport::Configured;
 use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Directions, Transport, socket};
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 /// The most one MSMQ message carries: four mebibytes.
 #[must_use]
@@ -139,12 +141,46 @@ impl MsmqTransport {
     }
 }
 
+impl Configured for MsmqTransport {
+    /// The address is where a Receive Location listens as the queue's HTTP
+    /// end; a Send Location's queue is its target.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "host",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The machine a Send Location signs its message identifiers as.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a peer that stops mid-message is waited on.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        // A Receive Location signs nothing, so it reads no host.
+        let transport = Self::new(address, settings.optional_text("host").unwrap_or_default());
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
+    }
+}
+
 /// The Stream a request carries, with the queue and id it carries it under.
 ///
 /// # Errors
 /// Where the request is not a POST to `/msmq/<queue>`, not
-/// `multipart/related`, carries no SRMP envelope, or names an attachment
-/// that is not there.
+/// `multipart/related`, carries no SRMP envelope or one that is not UTF-8
+/// text, or names an attachment that is not there. The attachment is bytes
+/// and is carried as it arrived.
 pub fn take(request: &Request) -> Result<Arrived> {
     if request.method != "POST" {
         return Err(protocol_error(format!(
@@ -162,7 +198,12 @@ pub fn take(request: &Request) -> Result<Arrived> {
     let first = parts
         .first()
         .ok_or_else(|| protocol_error("a message with no envelope"))?;
-    let envelope = envelope::parse(&String::from_utf8_lossy(&first.body))?;
+    let envelope = std::str::from_utf8(&first.body).map_err(|refused| {
+        protocol_error(format!(
+            "an SRMP envelope that is not UTF-8 text: {refused}"
+        ))
+    })?;
+    let envelope = envelope::parse(envelope)?;
     let body = parts
         .iter()
         .find(|part| part.content_id() == Some(envelope.body_id.as_str()))
@@ -248,10 +289,12 @@ impl Transport for MsmqTransport {
         if (200..300).contains(&response.status) {
             Ok(())
         } else {
+            let detail = response
+                .text()
+                .map_or_else(|refused| refused.to_string(), str::to_string);
             Err(TransportError::permanent(format!(
-                "the queue answered {}: {}",
-                response.status,
-                response.text()
+                "the queue answered {}: {detail}",
+                response.status
             )))
         }
     }
@@ -304,6 +347,26 @@ mod tests {
     }
 
     #[test]
+    fn msmq_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert!(MsmqTransport::SETTINGS.problems().is_empty());
+        let given = [
+            ("host".to_string(), Given::Text("node-a".to_string())),
+            ("timeout".to_string(), Given::Text("10s".to_string())),
+        ];
+        let built = MsmqTransport::open("0.0.0.0:80", Applies::Send, &given).expect("built");
+        assert_eq!(built.host, "node-a");
+        assert_eq!(built.timeout, Some(Duration::from_secs(10)));
+        let receiving =
+            MsmqTransport::open("0.0.0.0:80", Applies::Receive, &given[1..]).expect("built");
+        assert_eq!(receiving.bind, "0.0.0.0:80");
+        let Err(refused) = MsmqTransport::open("0.0.0.0:80", Applies::Send, &given[1..]) else {
+            panic!("a Send Location signs as a host");
+        };
+        assert!(refused.message.contains("\"host\""), "{refused}");
+    }
+
+    #[test]
     fn a_message_posted_to_the_queue_arrives_as_its_attachment() {
         let far_end = MsmqTransport::new("127.0.0.1:0", "node-b").timing_out_after(secs(2));
         let (listener, address) = far_end.bind().expect("binding");
@@ -339,6 +402,23 @@ mod tests {
         assert!(refused.message.contains("multipart/related"), "{refused}");
         let sent = sender.join().expect("thread").expect_err("answered 400");
         assert!(sent.message.contains("400"), "{sent}");
+    }
+
+    #[test]
+    fn an_envelope_that_is_not_utf_8_is_refused_and_never_read_lossily() {
+        let near = MsmqTransport::new("127.0.0.1:0", "node-a");
+        let mut request = near
+            .compose("http://node-b/msmq/orders", b"\xff")
+            .expect("composed");
+        let at = request
+            .body
+            .windows(8)
+            .position(|window| window == b"<action>")
+            .expect("an action");
+        request.body.insert(at + 8, 0xfe);
+        let refused = take(&request).expect_err("not UTF-8");
+        assert!(!refused.retryable);
+        assert!(refused.message.contains("not UTF-8"), "{refused}");
     }
 
     #[test]
