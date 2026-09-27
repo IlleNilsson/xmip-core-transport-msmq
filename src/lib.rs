@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use envelope::Envelope;
+use http::endpoint::{Connections, Offer};
 use http::server;
 use net::Endpoint;
 use net::http::{Request, Response};
@@ -67,6 +68,8 @@ pub struct MsmqTransport {
     host: String,
     next: AtomicU64,
     timeout: Option<Duration>,
+    /// The connections kept to the queues' HTTP ends.
+    connections: Connections,
 }
 
 impl MsmqTransport {
@@ -79,6 +82,7 @@ impl MsmqTransport {
             host: host.into(),
             next: AtomicU64::new(1),
             timeout: None,
+            connections: Connections::new(),
         }
     }
 
@@ -284,8 +288,10 @@ impl Transport for MsmqTransport {
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let url = queue_url(target)?;
         let request = self.compose(&url, bytes)?;
-        let connection = http::endpoint::connect(&Endpoint::parse(&url)?, self.timeout)?;
-        let response = net::http::exchange(connection, &request)?;
+        let endpoint = Endpoint::parse(&url)?;
+        let response =
+            self.connections
+                .exchange(&endpoint, self.timeout, Offer::Http11, &request)?;
         if (200..300).contains(&response.status) {
             Ok(())
         } else {
