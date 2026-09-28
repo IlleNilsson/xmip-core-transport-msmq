@@ -2,6 +2,8 @@
 
 MSMQ transport: one message is one Stream, carried as an SRMP envelope with its body attached over the HTTP transport MSMQ uses between machines. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
+A queue's target is read by `net::Target` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net) under the schemes this technology declares; `DIRECT=` is MSMQ's own and is taken off first. Until 2026-09-28 each form was matched by hand.
+
 ## Targets and HTTPS
 
 A send target is `msmq://<host>/<queue>`, the queue's HTTP URL
