@@ -4,18 +4,17 @@
 //! MS-MQSRM section 2.2: a SOAP 1.1 envelope whose header carries the
 //! WS-Routing `path` — the action, the destination queue, the message id
 //! — and the SRMP `properties`, and whose body names the attachment the
-//! message body travels as. The envelope is composed and read here as the
-//! flat scan the capability's `xml.rs` is (ADR-0044); a queue reads four
-//! elements out of it and never needs a tree.
+//! message body travels as. The envelope is composed here and read with
+//! the estate's flat scan (`codec::xml`), by local name; a queue reads a
+//! few elements and one attribute out of it and never needs a tree.
 
-use codec::xml::escape;
+use codec::xml::{escape, text};
 use transport::error::{Result, protocol_error};
-use transport::xml::first;
 
 /// The SOAP envelope namespace, as SRMP fixes it.
 pub const SOAP: &str = "http://schemas.xmlsoap.org/soap/envelope/";
 /// The WS-Routing namespace the `path` header is in.
-pub const ROUTING: &str = "http://schemas.xmlsoap.org/rp/";
+const ROUTING: &str = "http://schemas.xmlsoap.org/rp/";
 /// The SRMP namespace the `properties` header is in.
 pub const SRMP: &str = "http://schemas.xmlsoap.org/srmp/";
 /// The MSMQ namespace the `Msmq` header is in.
@@ -98,7 +97,7 @@ pub fn parse(xml: &str) -> Result<Envelope> {
     if !xml.contains("<se:Envelope") && !xml.contains(":Envelope") {
         return Err(protocol_error("not a SOAP envelope"));
     }
-    match first(xml, "action")? {
+    match text(xml, "action")? {
         Some(action) if action == ACTION => {}
         Some(action) => {
             return Err(protocol_error(format!(
@@ -107,14 +106,12 @@ pub fn parse(xml: &str) -> Result<Envelope> {
         }
         None => return Err(protocol_error("an envelope with no path header")),
     }
-    let to = first(xml, "to")?.ok_or_else(|| protocol_error("an envelope with no destination"))?;
-    let id = first(xml, "id")?.ok_or_else(|| protocol_error("an envelope with no message id"))?;
-    let body_id = xml
-        .split("href=\"cid:")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .map(codec::xml::unescape)
-        .transpose()?
+    let to = text(xml, "to")?.ok_or_else(|| protocol_error("an envelope with no destination"))?;
+    let id = text(xml, "id")?.ok_or_else(|| protocol_error("an envelope with no message id"))?;
+    // The attachment is named by the `Body` inside the SOAP `Body`.
+    let body = codec::xml::content(xml, "Body").unwrap_or_default();
+    let body_id = codec::xml::attribute(body, "Body", "href")?
+        .and_then(|href| href.strip_prefix("cid:").map(str::to_string))
         .ok_or_else(|| protocol_error("a body that names no attachment"))?;
     Ok(Envelope {
         id,
@@ -126,7 +123,7 @@ pub fn parse(xml: &str) -> Result<Envelope> {
 }
 
 fn number(xml: &str, name: &str) -> Result<u64> {
-    Ok(first(xml, name)?
+    Ok(text(xml, name)?
         .and_then(|text| text.parse().ok())
         .unwrap_or(0))
 }

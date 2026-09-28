@@ -45,10 +45,10 @@ pub use envelope::Envelope;
 use http::endpoint::{Connections, Offer};
 use http::inbound::Inbound;
 use http::server;
-use net::Endpoint;
+use net::ceiling;
 use net::http::{Request, Response};
+use net::{Endpoint, Schemes, Target};
 use transport::Configured;
-use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -62,7 +62,7 @@ pub const fn ceiling() -> usize {
 }
 
 /// The boundary every message this transport composes travels under.
-pub const BOUNDARY: &str = "MSMQ - SOAP boundary, 12345";
+const BOUNDARY: &str = "MSMQ - SOAP boundary, 12345";
 
 pub struct MsmqTransport {
     bind: String,
@@ -207,7 +207,10 @@ pub fn take(request: &Request) -> Result<Arrived> {
         .strip_prefix("/msmq/")
         .filter(|queue| !queue.is_empty())
         .ok_or_else(|| protocol_error(format!("{:?} is not /msmq/<queue>", request.path)))?;
-    let boundary = mime::boundary_of(request.header_value("Content-Type").unwrap_or_default())?;
+    let boundary = codec::mime::boundary_of(
+        request.header_value("Content-Type").unwrap_or_default(),
+        "multipart/related",
+    )?;
     let parts = mime::parts(boundary, &request.body)?;
     let first = parts
         .first()
@@ -237,41 +240,40 @@ pub fn take(request: &Request) -> Result<Arrived> {
 /// # Errors
 /// Where the target names no host or no queue.
 pub fn queue_url(target: &str) -> Result<String> {
-    let (scheme, authority, queue) = if let Some(rest) = target.strip_prefix("msmq://") {
-        let (authority, queue) = rest.split_once('/').unwrap_or((rest, ""));
-        ("http", authority, queue)
-    } else if let Some(rest) = target.strip_prefix("msmqs://") {
-        let (authority, queue) = rest.split_once('/').unwrap_or((rest, ""));
-        ("https", authority, queue)
-    } else {
-        let (scheme, stripped) = http_form(target)
-            .ok_or_else(|| protocol_error(format!("{target:?} is not an MSMQ queue")))?;
-        let (authority, path) = stripped.split_once('/').unwrap_or((stripped, ""));
-        (scheme, authority, path.strip_prefix("msmq/").unwrap_or(""))
-    };
-    if authority.is_empty() || queue.is_empty() {
-        return Err(protocol_error(format!(
-            "{target:?} names no host and queue"
-        )));
-    }
-    Ok(format!("{scheme}://{authority}/msmq/{queue}"))
-}
-
-/// The scheme and the rest of a target in the HTTP URL form or MSMQ's
-/// `DIRECT=` format name for it, the scheme in either case.
-fn http_form(target: &str) -> Option<(&'static str, &str)> {
     let url = target
         .get(..7)
         .filter(|head| head.eq_ignore_ascii_case("DIRECT="))
         .map_or(target, |_| &target[7..]);
-    [("https", "https://"), ("http", "http://")]
-        .into_iter()
-        .find_map(|(scheme, prefix)| {
-            url.get(..prefix.len())
-                .filter(|head| head.eq_ignore_ascii_case(prefix))
-                .map(|_| (scheme, &url[prefix.len()..]))
-        })
+    let named = Target::parse(url)
+        .ok()
+        .filter(|named| named.is(SCHEMES.plain) || named.is(SCHEMES.secure))
+        .ok_or_else(|| protocol_error(format!("{target:?} is not an MSMQ queue")))?;
+    let queue = if named.is(&["msmq", "msmqs"]) {
+        named.path()
+    } else {
+        named.path().strip_prefix("msmq/").unwrap_or_default()
+    };
+    if named.authority().is_empty() || queue.is_empty() {
+        return Err(protocol_error(format!(
+            "{target:?} names no host and queue"
+        )));
+    }
+    let scheme = if named.is(SCHEMES.secure) {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(format!("{scheme}://{}/msmq/{queue}", named.authority()))
 }
+
+/// The schemes a queue is written in: `msmq://host/queue` and the HTTP
+/// URL `http://host/msmq/queue` for the one, `msmqs://` and `https://`
+/// for the queue behind TLS; either HTTP form also as MSMQ's `DIRECT=`
+/// format name, in any case.
+const SCHEMES: Schemes = Schemes {
+    plain: &["http", "msmq"],
+    secure: &["https", "msmqs"],
+};
 
 fn now() -> u64 {
     SystemTime::now()

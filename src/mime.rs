@@ -28,21 +28,6 @@ pub fn part(content_type: &str, content_id: &str, bytes: &[u8]) -> Part {
         .header("Content-Length", &bytes.len().to_string())
 }
 
-/// The boundary a `Content-Type` names, or the refusal.
-///
-/// # Errors
-/// Where the type is not `multipart/related` or names no boundary.
-pub fn boundary_of(content_type: &str) -> Result<&str> {
-    if mime::media_type(content_type) != "multipart/related" {
-        return Err(protocol_error(format!(
-            "an SRMP message is multipart/related, not {content_type:?}"
-        )));
-    }
-    mime::parameter(content_type, "boundary")
-        .filter(|boundary| !boundary.is_empty())
-        .ok_or_else(|| protocol_error("a multipart type naming no boundary"))
-}
-
 /// The parts of an SRMP body under `boundary`.
 ///
 /// # Errors
@@ -74,14 +59,12 @@ mod tests {
     }
 
     #[test]
-    fn the_boundary_is_read_from_the_type_and_a_wrong_type_is_refused() {
-        assert_eq!(boundary_of(&content_type("abc")).expect("boundary"), "abc");
+    fn the_type_written_declares_its_boundary_and_a_broken_body_is_refused() {
+        let written = content_type("abc");
         assert_eq!(
-            boundary_of("Multipart/Related; type=text/xml; boundary=xyz").expect("boundary"),
-            "xyz"
+            mime::boundary_of(&written, "multipart/related").expect("boundary"),
+            "abc"
         );
-        assert!(!boundary_of("text/xml").expect_err("wrong").retryable);
-        assert!(boundary_of("multipart/related").is_err());
         assert!(parts("b", b"no boundary here").is_err());
         assert!(parts("b", b"--b\r\nContent-Type: x\r\n\r\nnever closes").is_err());
     }
