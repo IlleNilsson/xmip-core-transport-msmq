@@ -19,6 +19,8 @@ Requests go on connections kept between them (`http::endpoint::Connections`, off
 
 A Receive Location keeps its listener, bound on the first receive, and the connections senders keep open on it (`http::inbound::Inbound`): each receive takes the next request from whichever sends first, where until 2026-09-27 each receive bound a listener of its own, answered one request with `Connection: close`, and refused a request that came between two receives.
 
+A sender is answered after the runtime's whole receive cycle, not as its message is read: it waits on its connection (`http::inbound::Reply`) for `200` when the cycle accepted the message — as an MSMQ queue's HTTP end answers; `401`, `403` or `422` when it refused it (`http::server::refused`), a client error the sender does not send again; or `503` when Xmip could not complete the cycle, so the sender keeps the message and sends it again. A POST that is not an SRMP message is answered `400` at once. The answer is the one the request always had, written later: no added round trip. Until 2026-10-02 a message was answered `200` as it was read.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it

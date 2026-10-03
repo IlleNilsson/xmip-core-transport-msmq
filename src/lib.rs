@@ -25,7 +25,7 @@
 //! `msmq://node-b/orders#uuid:7@node-a`. A send target is
 //! `msmq://<host>/<queue>`, the queue's HTTP URL
 //! `http://<host>/msmq/<queue>`, or MSMQ's own format name for it,
-//! `DIRECT=HTTP://<host>/msmq/<queue>`. Each has a guarded form —
+//! `DIRECT=HTTP://<host>/msmq/<queue>` (`queue.rs`). Each has a guarded form —
 //! `msmqs://`, `https://`, `DIRECT=HTTPS://` — sent over HTTPS through the
 //! http technology's endpoint, as as2, as4 and webdav are; TLS is its `tls`
 //! feature (ADR-0033), and without it an https queue is refused rather
@@ -36,6 +36,7 @@
 
 pub mod envelope;
 pub mod mime;
+mod queue;
 
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,16 +44,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use envelope::Envelope;
 use http::endpoint::{Connections, Offer};
-use http::inbound::Inbound;
+use http::inbound::{Heard, Inbound};
 use http::server;
+use net::Endpoint;
 use net::ceiling;
 use net::http::{Request, Response};
-use net::{Endpoint, Schemes, Target};
+pub use queue::queue_url;
 use transport::Configured;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::{Arrived, Directions, Transport, socket};
+use transport::{Arrived, Directions, Taken, Transport, Verdict, socket};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 /// The most one MSMQ message carries: four mebibytes.
@@ -75,15 +77,32 @@ pub struct MsmqTransport {
     inbound: Inbound,
 }
 
-/// What one POST earns: the message it carries and `200`, or `400` and
-/// the refusal where it is not an SRMP message.
-fn answer(request: &Request) -> (Result<Arrived>, Response) {
+/// What one POST earns at a far end: the message it carries and `200`, or
+/// `400` and the refusal where it is not an SRMP message.
+fn answer(request: &Request) -> (Result<Taken>, Response) {
     match take(request) {
-        Ok(arrived) => (Ok(arrived), Response::new(200)),
+        Ok(taken) => (Ok(taken), Response::new(200)),
         Err(error) => {
-            let refusal = Response::new(400).body(error.message.as_bytes());
+            let refusal = refusal(&error);
             (Err(error), refusal)
         }
+    }
+}
+
+/// What a POST that is not an SRMP message is answered: `400` and why.
+fn refusal(error: &TransportError) -> Response {
+    Response::new(400).body(error.message.as_bytes())
+}
+
+/// What a sender is answered once its message's receive cycle has ended:
+/// `200` when it was accepted, as an MSMQ queue's HTTP end answers; `401`,
+/// `403` or `422` when it was refused (`http::server::refused`), a client
+/// error the sender does not send again; `503` when Xmip could not
+/// complete the cycle, so the sender keeps the message and sends it again.
+fn verdict(verdict: Verdict) -> Response {
+    match verdict {
+        Verdict::Accepted => Response::new(200),
+        Verdict::Refused(_) | Verdict::Failed => server::verdict(verdict),
     }
 }
 
@@ -123,7 +142,7 @@ impl MsmqTransport {
     /// # Errors
     /// Where the connection could not be accepted or read, or the request
     /// was not an SRMP message — which is answered `400` and refused.
-    pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
+    pub fn accept_one(&self, listener: &TcpListener) -> Result<Taken> {
         server::serve_one(listener, self.timeout, answer)?
     }
 
@@ -195,7 +214,7 @@ impl Configured for MsmqTransport {
 /// `multipart/related`, carries no SRMP envelope or one that is not UTF-8
 /// text, or names an attachment that is not there. The attachment is bytes
 /// and is carried as it arrived.
-pub fn take(request: &Request) -> Result<Arrived> {
+pub fn take(request: &Request) -> Result<Taken> {
     if request.method != "POST" {
         return Err(protocol_error(format!(
             "a {} where MSMQ POSTs",
@@ -226,54 +245,11 @@ pub fn take(request: &Request) -> Result<Arrived> {
         .find(|part| part.content_id() == Some(envelope.body_id.as_str()))
         .ok_or_else(|| protocol_error(format!("no attachment {:?}", envelope.body_id)))?;
     let host = request.header_value("Host").unwrap_or("localhost");
-    Ok(Arrived::new(
+    Ok(Taken::new(
         format!("msmq://{host}/{queue}#{}", envelope.id),
         body.body.clone(),
     ))
 }
-
-/// The queue URL a target names: `msmq://host/queue`, `http://host/msmq/queue`
-/// or `DIRECT=HTTP://host/msmq/queue`, each as `http://host/msmq/queue`; and
-/// their guarded forms `msmqs://host/queue`, `https://host/msmq/queue` or
-/// `DIRECT=HTTPS://host/msmq/queue`, each as `https://host/msmq/queue`.
-///
-/// # Errors
-/// Where the target names no host or no queue.
-pub fn queue_url(target: &str) -> Result<String> {
-    let url = target
-        .get(..7)
-        .filter(|head| head.eq_ignore_ascii_case("DIRECT="))
-        .map_or(target, |_| &target[7..]);
-    let named = Target::parse(url)
-        .ok()
-        .filter(|named| named.is(SCHEMES.plain) || named.is(SCHEMES.secure))
-        .ok_or_else(|| protocol_error(format!("{target:?} is not an MSMQ queue")))?;
-    let queue = if named.is(&["msmq", "msmqs"]) {
-        named.path()
-    } else {
-        named.path().strip_prefix("msmq/").unwrap_or_default()
-    };
-    if named.authority().is_empty() || queue.is_empty() {
-        return Err(protocol_error(format!(
-            "{target:?} names no host and queue"
-        )));
-    }
-    let scheme = if named.is(SCHEMES.secure) {
-        "https"
-    } else {
-        "http"
-    };
-    Ok(format!("{scheme}://{}/msmq/{queue}", named.authority()))
-}
-
-/// The schemes a queue is written in: `msmq://host/queue` and the HTTP
-/// URL `http://host/msmq/queue` for the one, `msmqs://` and `https://`
-/// for the queue behind TLS; either HTTP form also as MSMQ's `DIRECT=`
-/// format name, in any case.
-const SCHEMES: Schemes = Schemes {
-    plain: &["http", "msmq"],
-    secure: &["https", "msmqs"],
-};
 
 fn now() -> u64 {
     SystemTime::now()
@@ -290,13 +266,37 @@ impl Transport for MsmqTransport {
         Directions::BOTH
     }
 
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Unordered(
+            "each request is its own, and a connection waiting for its answer takes no next request",
+        )
+    }
+
     /// The next message from whichever sender posts first, on the listener
-    /// the first receive bound and the connections senders keep.
+    /// the first receive bound and the connections senders keep. The
+    /// sender waits for its answer until the receive cycle has ended:
+    /// `200` when it accepted the message, `503` when it refused it, so the
+    /// sender sends it again. What is not an SRMP message is answered `400`
+    /// at once.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let arrived =
-            self.inbound
-                .next(|| self.bind(), self.timeout, |request, _| answer(request))??;
-        Ok(vec![arrived])
+        let (taken, reply) = self.inbound.next(
+            || self.bind(),
+            self.timeout,
+            |request, _| match take(&request) {
+                Ok(taken) => Heard::Waiting(Ok(taken)),
+                Err(error) => {
+                    let refusal = refusal(&error);
+                    Heard::Answered(Err(error), refusal)
+                }
+            },
+        )?;
+        let taken = taken?;
+        let reply = reply.ok_or_else(|| protocol_error("a message answered unheard"))?;
+        Ok(vec![Arrived::whole(
+            taken.origin_uri,
+            taken.bytes,
+            reply.acknowledgement(verdict),
+        )])
     }
 
     /// POST the bytes as one message to the queue the target names.
@@ -313,10 +313,10 @@ impl Transport for MsmqTransport {
             let detail = response
                 .text()
                 .map_or_else(|refused| refused.to_string(), str::to_string);
-            Err(TransportError::permanent(format!(
-                "the queue answered {}: {detail}",
-                response.status
-            )))
+            Err(TransportError {
+                message: format!("the queue answered {}: {detail}", response.status),
+                retryable: http::status::retryable(response.status),
+            })
         }
     }
 }
@@ -400,7 +400,8 @@ mod tests {
             near.connections.opened()
         });
         for round in 0..5u8 {
-            assert_eq!(queue.receive().expect("received")[0].bytes, [round]);
+            let arrived = queue.receive().expect("received").remove(0);
+            assert_eq!(arrived.taken().expect("taken").bytes, [round]);
         }
         assert_eq!(
             sender.join().expect("sender"),
@@ -431,6 +432,39 @@ mod tests {
         );
         assert!(second.bytes.is_empty());
         assert!(second.origin_uri.ends_with("/invoices#uuid:2@node-a"));
+    }
+
+    #[test]
+    fn the_sender_is_answered_200_when_accepted_503_when_failed_and_4xx_when_refused() {
+        let queue = MsmqTransport::new("127.0.0.1:0", "node-b").timing_out_after(secs(2));
+        let address = queue.inbound.bound(|| queue.bind()).expect("bound");
+        let target = format!("msmq://{address}/orders");
+        let sender = std::thread::spawn(move || {
+            let near = MsmqTransport::new("127.0.0.1:0", "node-a").timing_out_after(secs(2));
+            let failed = near.send(&target, b"first try");
+            let accepted = near.send(&target, b"second try");
+            let refused = near.send(&target, b"third try");
+            (failed, accepted, refused)
+        });
+        let first = queue.receive().expect("first").remove(0);
+        assert!(first.defers(), "the sender waits for the verdict");
+        first.failed().expect("answered");
+        let second = queue.receive().expect("second").remove(0);
+        assert_eq!(second.taken().expect("taken").bytes, b"second try");
+        let third = queue.receive().expect("third").remove(0);
+        third
+            .refused(transport::Refusal::Forbidden)
+            .expect("answered");
+        let (failed, accepted, refused) = sender.join().expect("thread");
+        let failed = failed.expect_err("503");
+        assert!(
+            failed.retryable && failed.message.contains("503"),
+            "{failed}"
+        );
+        accepted.expect("200");
+        let refused = refused.expect_err("403");
+        assert!(!refused.retryable, "not sent again: {refused}");
+        assert!(refused.message.contains("403"), "{refused}");
     }
 
     #[test]
