@@ -146,14 +146,19 @@ impl MsmqTransport {
         server::serve_one(listener, self.timeout, answer)?
     }
 
-    /// The POST that carries `bytes` to the queue at `url`.
+    /// The POST that carries `bytes` to the queue at `url`, its message id
+    /// `uuid:<key>@<host>` where there is a key, the same on every attempt,
+    /// and `uuid:<n>@<host>` by this transport's count where there is none.
     ///
     /// # Errors
     /// Where the Stream is over the [`ceiling`].
-    pub fn compose(&self, url: &str, bytes: &[u8]) -> Result<Request> {
+    pub fn compose(&self, url: &str, bytes: &[u8], key: Option<&str>) -> Result<Request> {
         ceiling::within(bytes.len(), ceiling(), "one MSMQ message carries")?;
         let n = self.next.fetch_add(1, Ordering::Relaxed);
-        let id = format!("uuid:{n}@{}", self.host);
+        let id = match key {
+            Some(key) => format!("uuid:{key}@{}", self.host),
+            None => format!("uuid:{n}@{}", self.host),
+        };
         let body_id = format!("body{n}@{}", self.host);
         let envelope = Envelope::new(&id, url, &body_id, now());
         let parts = [
@@ -301,8 +306,22 @@ impl Transport for MsmqTransport {
 
     /// POST the bytes as one message to the queue the target names.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+        self.post(target, bytes, None)
+    }
+
+    /// The key goes in the SRMP envelope's message id, `uuid:<key>@<host>`,
+    /// by which the receiving queue manager tells a message sent again from
+    /// one it holds.
+    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
+        self.post(target, bytes, Some(key))
+    }
+}
+
+impl MsmqTransport {
+    /// The one send: one message posted to the queue `target` names.
+    fn post(&self, target: &str, bytes: &[u8], key: Option<&str>) -> Result<()> {
         let url = queue_url(target)?;
-        let request = self.compose(&url, bytes)?;
+        let request = self.compose(&url, bytes, key)?;
         let endpoint = Endpoint::parse(&url)?;
         let response =
             self.connections
@@ -486,7 +505,7 @@ mod tests {
     fn an_envelope_that_is_not_utf_8_is_refused_and_never_read_lossily() {
         let near = MsmqTransport::new("127.0.0.1:0", "node-a");
         let mut request = near
-            .compose("http://node-b/msmq/orders", b"\xff")
+            .compose("http://node-b/msmq/orders", b"\xff", None)
             .expect("composed");
         let at = request
             .body
@@ -538,7 +557,7 @@ mod tests {
         assert!(queue_url("msmqs://node-b").is_err(), "no queue");
         let near = MsmqTransport::new("127.0.0.1:0", "node-a");
         let request = near
-            .compose("https://node-b:8443/msmq/orders", b"fits")
+            .compose("https://node-b:8443/msmq/orders", b"fits", None)
             .expect("composed");
         assert_eq!(request.header_value("Host"), Some("node-b:8443"));
         assert_eq!(request.path, "/msmq/orders");
@@ -567,12 +586,12 @@ mod tests {
         let near = MsmqTransport::new("127.0.0.1:0", "node-a");
         let over = vec![0u8; ceiling() + 1];
         let error = near
-            .compose("http://node-b/msmq/orders", &over)
+            .compose("http://node-b/msmq/orders", &over, None)
             .expect_err("over");
         assert!(!error.retryable);
         assert!(error.message.contains("4194304"), "{error}");
         let request = near
-            .compose("http://node-b/msmq/orders", b"fits")
+            .compose("http://node-b/msmq/orders", b"fits", None)
             .expect("fits");
         assert_eq!(request.header_value("Host"), Some("node-b"));
         assert_eq!(request.path, "/msmq/orders");

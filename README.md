@@ -21,6 +21,10 @@ A Receive Location keeps its listener, bound on the first receive, and the conne
 
 A sender is answered after the runtime's whole receive cycle, not as its message is read: it waits on its connection (`http::inbound::Reply`) for `200` when the cycle accepted the message — as an MSMQ queue's HTTP end answers; `401`, `403` or `422` when it refused it (`http::server::refused`), a client error the sender does not send again; or `503` when Xmip could not complete the cycle, so the sender keeps the message and sends it again. A POST that is not an SRMP message is answered `400` at once. The answer is the one the request always had, written later: no added round trip. Until 2026-10-02 a message was answered `200` as it was read.
 
+## The deduplication key
+
+A keyed send (`Transport::send_keyed`, built 2026-10-04) carries the Journey's identifier in the SRMP envelope's message id, `uuid:<key>@<host>` (`MsmqTransport::compose`), the same on every attempt of one Journey and from every node, `host` being the Location's configured name. A receiving queue manager and its consumer tell a message sent again from one held by that id. An unkeyed `send` is numbered by its sender, `uuid:<n>@<host>`, as before.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
