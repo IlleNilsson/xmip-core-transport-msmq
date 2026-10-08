@@ -50,6 +50,7 @@ use net::Endpoint;
 use net::ceiling;
 use net::http::{Request, Response};
 pub use queue::queue_url;
+use transport::ArrivalIdentity;
 use transport::Configured;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
@@ -143,7 +144,11 @@ impl MsmqTransport {
     /// Where the connection could not be accepted or read, or the request
     /// was not an SRMP message — which is answered `400` and refused.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Taken> {
-        server::serve_one(listener, self.timeout, answer)?
+        server::serve_one_from(listener, self.timeout, |request, peer| {
+            let (taken, response) = answer(request);
+            let sender = server::Sender::of(request, peer);
+            (taken.map(|taken| sender.taken(taken)), response)
+        })?
     }
 
     /// The POST that carries `bytes` to the queue at `url`, its message id
@@ -287,21 +292,21 @@ impl Transport for MsmqTransport {
         let (taken, reply) = self.inbound.next(
             || self.bind(),
             self.timeout,
-            |request, _| match take(&request) {
-                Ok(taken) => Heard::Waiting(Ok(taken)),
+            |request, peer| match take(&request) {
+                Ok(taken) => Heard::Waiting(Ok((taken, server::Sender::of(&request, peer)))),
                 Err(error) => {
                     let refusal = refusal(&error);
                     Heard::Answered(Err(error), refusal)
                 }
             },
         )?;
-        let taken = taken?;
+        let (taken, sender) = taken?;
         let reply = reply.ok_or_else(|| protocol_error("a message answered unheard"))?;
-        Ok(vec![Arrived::whole(
+        Ok(vec![sender.on(Arrived::whole(
             taken.origin_uri,
             taken.bytes,
             reply.acknowledgement(verdict),
-        )])
+        ))])
     }
 
     /// POST the bytes as one message to the queue the target names.
@@ -360,6 +365,10 @@ impl MsmqTransport {
 }
 
 impl Loopback for MsmqTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        http::server::REQUEST
+    }
+
     fn ceiling(&self) -> Option<usize> {
         Some(ceiling())
     }
