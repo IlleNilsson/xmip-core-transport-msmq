@@ -282,6 +282,10 @@ impl Transport for MsmqTransport {
         )
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the listener waits for a message to be posted")
+    }
+
     /// The next message from whichever sender posts first, on the listener
     /// the first receive bound and the connections senders keep. The
     /// sender waits for its answer until the receive cycle has ended:
