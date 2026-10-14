@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn msmq_declares_its_settings_and_reads_through_them() {
         use xcore::settings::Given;
-        assert!(MsmqTransport::SETTINGS.problems().is_empty());
+        assert_eq!(MsmqTransport::SETTINGS.problems(), [] as [String; 0]);
         let given = [
             ("host".to_string(), Given::Text("node-a".to_string())),
             ("timeout".to_string(), Given::Text("10s".to_string())),
@@ -462,7 +462,7 @@ mod tests {
             "{}",
             first.origin_uri
         );
-        assert!(second.bytes.is_empty());
+        assert_eq!(second.bytes, [] as [u8; 0]);
         assert!(second.origin_uri.ends_with("/invoices#uuid:2@node-a"));
     }
 
