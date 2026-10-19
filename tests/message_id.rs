@@ -21,8 +21,10 @@ fn a_keyed_message_carries_the_journey_id_as_its_message_id_on_every_attempt() {
     });
     let near = MsmqTransport::new("127.0.0.1:0", "near");
     let target = format!("msmq://{address}/orders");
-    near.send_keyed(&target, b"order", KEY).expect("sent");
-    near.send_keyed(&target, b"order", KEY).expect("sent again");
+    near.send_from(&target, transport::Outgoing::held(b"order").keyed(KEY))
+        .expect("sent");
+    near.send_from(&target, transport::Outgoing::held(b"order").keyed(KEY))
+        .expect("sent again");
     near.send(&target, b"order").expect("sent unkeyed");
     let taken = taking.join().expect("far end");
     let ids: Vec<&str> = taken

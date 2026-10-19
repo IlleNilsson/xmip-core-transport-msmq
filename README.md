@@ -23,7 +23,7 @@ A sender is answered after the runtime's whole receive cycle, not as its message
 
 ## The deduplication key
 
-A keyed send (`Transport::send_keyed`, built 2026-10-04) carries the Journey's identifier in the SRMP envelope's message id, `uuid:<key>@<host>` (`MsmqTransport::compose`), the same on every attempt of one Journey and from every node, `host` being the Location's configured name. A receiving queue manager and its consumer tell a message sent again from one held by that id. An unkeyed `send` is numbered by its sender, `uuid:<n>@<host>`, as before.
+A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier in the SRMP envelope's message id, `uuid:<key>@<host>` (`MsmqTransport::compose`), the same on every attempt of one Journey and from every node, `host` being the Location's configured name. A receiving queue manager and its consumer tell a message sent again from one held by that id. An unkeyed `send` is numbered by its sender, `uuid:<n>@<host>`, as before.
 
 ## Toolchain
 
