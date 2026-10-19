@@ -292,7 +292,7 @@ impl Transport for MsmqTransport {
     /// `200` when it accepted the message, `503` when it refused it, so the
     /// sender sends it again. What is not an SRMP message is answered `400`
     /// at once.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let (taken, reply) = self.inbound.next(
             || self.bind(),
             self.timeout,
@@ -313,16 +313,17 @@ impl Transport for MsmqTransport {
         ))])
     }
 
-    /// POST the bytes as one message to the queue the target names.
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        self.post(target, bytes, None)
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("one MSMQ message carries the whole body")
     }
 
+    /// POST the bytes as one message to the queue the target names.
     /// The key goes in the SRMP envelope's message id, `uuid:<key>@<host>`,
     /// by which the receiving queue manager tells a message sent again from
     /// one it holds.
-    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
-        self.post(target, bytes, Some(key))
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
+        self.post(target, bytes, outgoing.key())
     }
 }
 
