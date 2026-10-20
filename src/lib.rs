@@ -15,7 +15,7 @@
 //! carrier. The binary MSMQ protocol on port 1801 (MS-MQQB) is a machine's
 //! own and is not spoken here; SRMP is what MSMQ itself uses to cross one.
 //!
-//! A queue is not an artefact anyone claims: MSMQ delivers a message once,
+//! A queue is not an artifact anyone claims: MSMQ delivers a message once,
 //! and the `200 OK` is the receipt, so [`Transport::claims`] answers
 //! `None`. The one ceiling is MSMQ's own: a message is at most four
 //! mebibytes, and a Stream over that is refused before a request is
