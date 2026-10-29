@@ -207,6 +207,12 @@ impl Configured for MsmqTransport {
         ],
     };
 
+    const SCHEMES: &'static [&'static str] = &["msmq", "msmqs"];
+    /// The whole address: its scheme says whether TLS guards the endpoint.
+    fn own_terms(address: &str) -> &str {
+        address
+    }
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         // A Receive Location signs nothing, so it reads no host.
         let transport = Self::new(address, settings.optional_text("host").unwrap_or_default());
