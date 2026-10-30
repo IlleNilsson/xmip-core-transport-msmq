@@ -1,5 +1,5 @@
 //! A keyed send carries its deduplication key in the SRMP envelope's
-//! message id, `uuid:<key>@<host>`, the same on every attempt of one
+//! message id, `uuid:<key>@<host>`, the same on every attempt on one
 //! Journey; an unkeyed send is numbered by its sender.
 
 use std::thread;
