@@ -595,10 +595,14 @@ mod tests {
             .expect_err("no handshake");
         drop(listener);
         let refused = failure.message.contains("no tls feature");
-        #[cfg(feature = "tls")]
-        assert!(!refused, "{failure}");
-        #[cfg(not(feature = "tls"))]
-        assert!(refused, "{failure}");
+        cfg_select! {
+            feature = "tls" => {
+                assert!(!refused, "{failure}");
+            }
+            _ => {
+                assert!(refused, "{failure}");
+            }
+        }
     }
 
     #[test]
