@@ -12,7 +12,7 @@ use transport::error::{Result, protocol_error};
 /// URL `http://host/msmq/queue` for the one, `msmqs://` and `https://`
 /// for the queue behind TLS; either HTTP form also as MSMQ's `DIRECT=`
 /// format name, in any case.
-const SCHEMES: Schemes = Schemes {
+pub(crate) const SCHEMES: Schemes = Schemes {
     plain: &["http", "msmq"],
     secure: &["https", "msmqs"],
 };
