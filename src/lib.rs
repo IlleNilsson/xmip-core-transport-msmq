@@ -46,16 +46,13 @@ pub use envelope::Envelope;
 use http::endpoint::{Connections, Offer};
 use http::inbound::{Heard, Inbound};
 use http::server;
-use net::Endpoint;
-use net::ceiling;
 use net::http::{Request, Response};
+use net::{Endpoint, ceiling};
 pub use queue::queue_url;
-use transport::ArrivalIdentity;
-use transport::Configured;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::{Arrived, Directions, Taken, Transport, Verdict, socket};
+use transport::{ArrivalIdentity, Arrived, Configured, Directions, Taken, Transport, Verdict};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 /// The most one MSMQ message carries: four mebibytes.
@@ -134,7 +131,7 @@ impl MsmqTransport {
     /// # Errors
     /// Where the address is taken, malformed, or not permitted.
     pub fn bind(&self) -> Result<(TcpListener, String)> {
-        socket::bind_tcp(&self.bind)
+        server::listen(&self.bind, &queue::SCHEMES)
     }
 
     /// Take one message from an already-bound listener: one POST, read,
@@ -282,6 +279,9 @@ impl Transport for MsmqTransport {
         Directions::BOTH
     }
 
+    fn turned_away(&self) -> transport::Turned {
+        self.inbound.turned_away()
+    }
     fn arrivals(&self) -> transport::Arrivals {
         transport::Arrivals::Unordered(
             "each request is its own, and a connection waiting for its answer takes no next request",
@@ -297,20 +297,19 @@ impl Transport for MsmqTransport {
     /// sender waits for its answer until the receive cycle has ended:
     /// `200` when it accepted the message, `503` when it refused it, so the
     /// sender sends it again. What is not an SRMP message is answered `400`
-    /// at once.
+    /// at once, its sender turned away, and the receive goes on.
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
-        let (taken, reply) = self.inbound.next(
+        let ((taken, sender), reply) = self.inbound.next(
             || self.bind(),
             self.timeout,
             |request, peer| match take(&request) {
-                Ok(taken) => Heard::Waiting(Ok((taken, server::Sender::of(&request, peer)))),
+                Ok(taken) => Heard::Waiting((taken, server::Sender::of(&request, peer))),
                 Err(error) => {
                     let refusal = refusal(&error);
-                    Heard::Answered(Err(error), refusal)
+                    Heard::Refused(error, refusal)
                 }
             },
         )?;
-        let (taken, sender) = taken?;
         let reply = reply.ok_or_else(|| protocol_error("a message answered unheard"))?;
         Ok(vec![sender.on(Arrived::whole(
             taken.origin_uri,
@@ -401,6 +400,7 @@ impl Loopback for MsmqTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transport::socket;
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
@@ -424,6 +424,25 @@ mod tests {
             panic!("a Send Location signs as a host");
         };
         assert!(refused.message.contains("\"host\""), "{refused}");
+    }
+
+    #[test]
+    fn a_queue_entered_msmq_listens_at_its_authority_and_msmqs_never_in_the_clear() {
+        let plain = MsmqTransport::open("msmq://127.0.0.1:0/orders", Applies::Receive, &[]);
+        let (_, at) = plain.expect("built").bind().expect("listens");
+        assert!(at.starts_with("127.0.0.1:"), "{at}");
+        let secure = MsmqTransport::open("MSMQS://127.0.0.1:0/orders", Applies::Receive, &[]);
+        let refused = secure
+            .expect("built")
+            .bind()
+            .expect_err("no TLS termination yet");
+        assert!(!refused.retryable, "{refused}");
+        assert!(
+            refused
+                .message
+                .contains("enter it as msmq://127.0.0.1:0/orders"),
+            "{refused}"
+        );
     }
 
     #[test]
