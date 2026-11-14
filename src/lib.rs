@@ -37,10 +37,11 @@
 pub mod envelope;
 pub mod mime;
 mod queue;
+mod settings;
 
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub use envelope::Envelope;
 use http::endpoint::{Connections, Offer};
@@ -52,8 +53,8 @@ pub use queue::queue_url;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::{ArrivalIdentity, Arrived, Configured, Directions, Taken, Transport, Verdict};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+use transport::{ArrivalIdentity, Arrived, Directions, Taken, Transport, Verdict};
+use xcore::{Clock, SystemClock};
 
 /// The most one MSMQ message carries: four mebibytes.
 #[must_use]
@@ -181,45 +182,6 @@ impl MsmqTransport {
     }
 }
 
-impl Configured for MsmqTransport {
-    /// The address is where a Receive Location listens as the queue's HTTP
-    /// end; a Send Location's queue is its target.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "host",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The machine a Send Location signs its message identifiers as.",
-                applies: Applies::Send,
-            },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a peer that stops mid-message is waited on.",
-                applies: Applies::Both,
-            },
-        ],
-    };
-
-    const SCHEMES: &'static [&'static str] = &["msmq", "msmqs"];
-    /// The whole address: its scheme says whether TLS guards the endpoint.
-    fn own_terms(address: &str) -> &str {
-        address
-    }
-
-    fn configured(address: &str, settings: &Read) -> Result<Self> {
-        // A Receive Location signs nothing, so it reads no host.
-        let transport = Self::new(address, settings.optional_text("host").unwrap_or_default());
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
-    }
-}
-
 /// The Stream a request carries, with the queue and id it carries it under.
 ///
 /// # Errors
@@ -265,9 +227,7 @@ pub fn take(request: &Request) -> Result<Taken> {
 }
 
 fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
+    u64::try_from(SystemClock.unix_seconds()).unwrap_or(0)
 }
 
 impl Transport for MsmqTransport {
@@ -400,7 +360,8 @@ impl Loopback for MsmqTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use transport::socket;
+    use transport::{Configured, socket};
+    use xcore::settings::Applies;
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
