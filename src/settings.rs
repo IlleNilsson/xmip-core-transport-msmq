@@ -23,13 +23,11 @@ impl Configured for MsmqTransport {
                 meaning: "The machine a Send Location signs its message identifiers as.",
                 applies: Applies::Send,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a peer that stops mid-message is waited on.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a peer that stops mid-message is waited on.",
+            ),
         ],
     };
 
@@ -39,13 +37,16 @@ impl Configured for MsmqTransport {
         address
     }
 
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         // A Receive Location signs nothing, so it reads no host.
-        let transport = Self::new(address, settings.optional_text("host").unwrap_or_default());
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
+        Ok(Self::new(
+            address,
+            settings.optional_text("host").unwrap_or_default(),
+        ))
     }
 
     /// Each caller's turn on a Receive Location taking at most `turn`.
