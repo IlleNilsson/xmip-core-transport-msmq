@@ -53,7 +53,7 @@ pub use queue::queue_url;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::{ArrivalIdentity, Arrived, Directions, Taken, Transport, Verdict};
+use transport::{ArrivalIdentity, Arrived, Configured, Directions, Taken, Transport, Verdict};
 use xcore::{Clock, SystemClock};
 
 /// The most one MSMQ message carries: four mebibytes.
@@ -118,13 +118,6 @@ impl MsmqTransport {
             connections: Connections::new(),
             inbound: Inbound::new(),
         }
-    }
-
-    /// Give up on a peer that stops mid-message.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
     }
 
     /// Bind and report the address actually assigned.
