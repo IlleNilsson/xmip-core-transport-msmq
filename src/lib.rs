@@ -247,23 +247,21 @@ impl Transport for MsmqTransport {
     }
 
     /// The next message from whichever sender posts first, on the listener
-    /// the first receive bound and the connections senders keep. The
+    /// its open bound and the connections senders keep. The
     /// sender waits for its answer until the receive cycle has ended:
     /// `200` when it accepted the message, `503` when it refused it, so the
     /// sender sends it again. What is not an SRMP message is answered `400`
     /// at once, its sender turned away, and the receive goes on.
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
-        let ((taken, sender), reply) = self.inbound.next(
-            || self.bind(),
-            self.timeout,
-            |request, peer| match take(&request) {
-                Ok(taken) => Heard::Waiting((taken, server::Sender::of(&request, peer))),
-                Err(error) => {
-                    let refusal = refusal(&error);
-                    Heard::Refused(error, refusal)
-                }
-            },
-        )?;
+        let ((taken, sender), reply) =
+            self.inbound
+                .next(self.timeout, |request, peer| match take(&request) {
+                    Ok(taken) => Heard::Waiting((taken, server::Sender::of(&request, peer))),
+                    Err(error) => {
+                        let refusal = refusal(&error);
+                        Heard::Refused(error, refusal)
+                    }
+                })?;
         let reply = reply.ok_or_else(|| protocol_error("a message answered unheard"))?;
         Ok(vec![sender.on(Arrived::whole(
             taken.origin_uri,

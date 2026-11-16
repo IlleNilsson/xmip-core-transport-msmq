@@ -62,6 +62,12 @@ impl Configured for MsmqTransport {
         self.connections = self.connections.timed_by(clock);
         self
     }
+
+    /// The listener every receive takes from, bound where a Receive
+    /// Location's queue listens.
+    fn listening(&self) -> Result<Option<&str>> {
+        self.inbound.bound(|| self.bind()).map(Some)
+    }
 }
 
 #[cfg(test)]
