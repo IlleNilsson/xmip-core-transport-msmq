@@ -135,7 +135,8 @@ impl MsmqTransport {
     /// Where the connection could not be accepted or read, or the request
     /// was not an SRMP message — which is answered `400` and refused.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Taken> {
-        server::serve_one_from(listener, self.timeout, |request, peer| {
+        let clock = std::sync::Arc::clone(self.connections.clock());
+        server::serve_one_from(listener, self.timeout, clock, |request, peer| {
             let (taken, response) = answer(request);
             let sender = server::Sender::of(request, peer);
             (taken.map(|taken| sender.taken(taken)), response)
