@@ -54,6 +54,14 @@ impl Configured for MsmqTransport {
         self.inbound = self.inbound.turning_within(turn);
         self
     }
+
+    /// Each callers turn on a Receive Location, and an HTTP/2 peers frames
+    /// in a span both ways, counted on clock.
+    fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
+        self.inbound = self.inbound.timed_by(clock);
+        self.connections = self.connections.timed_by(clock);
+        self
+    }
 }
 
 #[cfg(test)]
