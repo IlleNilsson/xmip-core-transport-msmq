@@ -557,24 +557,57 @@ mod tests {
 
     #[test]
     fn a_guarded_queue_is_carried_to_the_endpoint_rather_than_sent_in_the_clear() {
-        // A listener that accepts and never speaks: a TLS build reaches it
-        // and waits out a handshake, a build without TLS refuses https on
-        // the open socket rather than write the message in the clear.
+        use std::io::Read;
+        // A listener that reads what reaches it and never speaks, so the
+        // promise is checked on the wire and not by which features this
+        // build happens to hold: whether TLS is compiled in is http's
+        // feature, which another crate in the same build may turn on while
+        // msmq's own stays off. Where TLS is in, the sender begins a
+        // handshake and waits it out; where it is not, https is refused on
+        // the open socket. Either way the order never reaches the wire in
+        // the clear, and that is what is asserted.
         let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let far_end = std::thread::spawn(move || {
+            let (mut connection, _) =
+                socket::accept_tcp(&listener, Some(secs(2))).expect("the sender connects");
+            // Read until the sender hangs up, or until the read timeout,
+            // which guards against a sender that never does; what was read
+            // before either is kept.
+            let mut heard = Vec::new();
+            let _ = connection.read_to_end(&mut heard);
+            heard
+        });
         let near = MsmqTransport::new("127.0.0.1:0", "node-a").timing_out_after(secs(1));
         let failure = near
             .send(&format!("msmqs://{address}/orders"), b"<order/>")
             .expect_err("no handshake");
-        drop(listener);
-        let refused = failure.message.contains("no tls feature");
-        cfg_select! {
-            feature = "tls" => {
-                assert!(!refused, "{failure}");
-            }
-            _ => {
-                assert!(refused, "{failure}");
-            }
-        }
+        // The sender's connection closes with it, so the far end's read
+        // ends now rather than at its timeout.
+        drop(near);
+        let heard = far_end.join().expect("the far end");
+        let reached = |needle: &[u8]| heard.windows(needle.len()).any(|window| window == needle);
+        assert!(
+            !reached(b"<order/>"),
+            "the order was sent in the clear: {failure}"
+        );
+        assert!(
+            !reached(b"POST /msmq/orders HTTP/1.1"),
+            "a request was sent in the clear: {failure}"
+        );
+        // A TLS client's first record is a handshake (content type 22);
+        // nothing at all reaches the wire where https was refused.
+        assert!(
+            heard.first().is_none_or(|&first| first == 22),
+            "what reached the endpoint is not a TLS handshake: {heard:?}"
+        );
+        // Where msmq's own tls feature is on, it turns http's on too, so
+        // https is never refused there. Where it is off, the refusal and
+        // the handshake that never completed are both correct.
+        #[cfg(feature = "tls")]
+        assert!(
+            !failure.message.contains("no tls feature"),
+            "refused in a build with tls: {failure}"
+        );
     }
 
     #[test]
