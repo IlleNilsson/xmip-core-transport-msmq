@@ -1,37 +1,20 @@
-//! What an MSMQ Location is configured with: the declaration
-//! [`MsmqTransport`] reads its settings through (ADR-0064, amendment
-//! 2026-09-26).
+//! An MSMQ Location built from what it is configured with, its declaration
+//! read through (`declaration.rs`; ADR-0064, amendments 2026-09-26 and
+//! 2026-11-26).
 
 use std::time::Duration;
 
 use transport::Configured;
 use transport::error::Result;
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+use xcore::settings::{Read, Settings};
 
 use crate::MsmqTransport;
+use crate::declaration;
 
 impl Configured for MsmqTransport {
-    /// The address is where a Receive Location listens as the queue's HTTP
-    /// end; a Send Location's queue is its target.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "host",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The machine a Send Location signs its message identifiers as.",
-                applies: Applies::Send,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a peer that stops mid-message is waited on.",
-            ),
-        ],
-    };
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
-    const SCHEMES: &'static [&'static str] = &["msmq", "msmqs"];
     /// The whole address: its scheme says whether TLS guards the endpoint.
     fn own_terms(address: &str) -> &str {
         address
@@ -73,6 +56,7 @@ impl Configured for MsmqTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xcore::settings::Applies;
 
     #[test]
     fn a_receive_location_turns_each_caller_within_the_nodes_span() {

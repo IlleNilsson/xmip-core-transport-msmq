@@ -33,38 +33,68 @@
 //!
 //! The transport is its own far end (ADR-0051): [`Loopback`] stands the
 //! queue's HTTP end up on an ephemeral port and takes the one POST.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature, the http technology
+//! with it: what the surfaces' library carries (ADR-0064, amendment
+//! 2026-11-26).
 
+#[cfg(feature = "default")]
+mod configured;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod envelope;
+#[cfg(feature = "default")]
 pub mod mime;
+#[cfg(feature = "default")]
 mod queue;
-mod settings;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 pub use envelope::Envelope;
+#[cfg(feature = "default")]
 use http::endpoint::{Connections, Offer};
+#[cfg(feature = "default")]
 use http::inbound::{Heard, Inbound};
+#[cfg(feature = "default")]
 use http::server;
+#[cfg(feature = "default")]
 use net::http::{Request, Response};
+#[cfg(feature = "default")]
 use net::{Endpoint, ceiling};
+#[cfg(feature = "default")]
 pub use queue::queue_url;
+#[cfg(feature = "default")]
 use transport::error::{Result, TransportError, protocol_error};
+#[cfg(feature = "default")]
 use transport::listening::Listening;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+#[cfg(feature = "default")]
 use transport::{ArrivalIdentity, Arrived, Configured, Directions, Taken, Transport, Verdict};
+#[cfg(feature = "default")]
 use xcore::{Clock, SystemClock};
 
 /// The most one MSMQ message carries: four mebibytes.
+#[cfg(feature = "default")]
 #[must_use]
 pub const fn ceiling() -> usize {
     4 * 1024 * 1024
 }
 
 /// The boundary every message this transport composes travels under.
+#[cfg(feature = "default")]
 const BOUNDARY: &str = "MSMQ - SOAP boundary, 12345";
 
+#[cfg(feature = "default")]
 pub struct MsmqTransport {
     bind: String,
     host: String,
@@ -78,6 +108,7 @@ pub struct MsmqTransport {
 
 /// What one POST earns at a far end: the message it carries and `200`, or
 /// `400` and the refusal where it is not an SRMP message.
+#[cfg(feature = "default")]
 fn answer(request: &Request) -> (Result<Taken>, Response) {
     match take(request) {
         Ok(taken) => (Ok(taken), Response::new(200)),
@@ -89,6 +120,7 @@ fn answer(request: &Request) -> (Result<Taken>, Response) {
 }
 
 /// What a POST that is not an SRMP message is answered: `400` and why.
+#[cfg(feature = "default")]
 fn refusal(error: &TransportError) -> Response {
     Response::new(400).body(error.message.as_bytes())
 }
@@ -98,6 +130,7 @@ fn refusal(error: &TransportError) -> Response {
 /// `403` or `422` when it was refused (`http::server::refused`), a client
 /// error the sender does not send again; `503` when Xmip could not
 /// complete the cycle, so the sender keeps the message and sends it again.
+#[cfg(feature = "default")]
 fn verdict(verdict: Verdict) -> Response {
     match verdict {
         Verdict::Accepted => Response::new(200),
@@ -105,6 +138,7 @@ fn verdict(verdict: Verdict) -> Response {
     }
 }
 
+#[cfg(feature = "default")]
 impl MsmqTransport {
     /// Listen at `bind` as the queue's HTTP end, and sign messages as
     /// `host`.
@@ -183,6 +217,7 @@ impl MsmqTransport {
 /// `multipart/related`, carries no SRMP envelope or one that is not UTF-8
 /// text, or names an attachment that is not there. The attachment is bytes
 /// and is carried as it arrived.
+#[cfg(feature = "default")]
 pub fn take(request: &Request) -> Result<Taken> {
     if request.method != "POST" {
         return Err(protocol_error(format!(
@@ -220,10 +255,12 @@ pub fn take(request: &Request) -> Result<Taken> {
     ))
 }
 
+#[cfg(feature = "default")]
 fn now() -> u64 {
     u64::try_from(SystemClock.unix_seconds()).unwrap_or(0)
 }
 
+#[cfg(feature = "default")]
 impl Transport for MsmqTransport {
     fn name(&self) -> &'static str {
         "msmq"
@@ -284,6 +321,7 @@ impl Transport for MsmqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl MsmqTransport {
     /// The one send: one message posted to the queue `target` names.
     fn post(&self, target: &str, bytes: &[u8], key: Option<&str>) -> Result<()> {
@@ -307,6 +345,7 @@ impl MsmqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl MsmqTransport {
     /// Both ends on this machine: the queue's HTTP end on an ephemeral
     /// local port, the loopback timeout on both sides.
@@ -326,6 +365,7 @@ impl MsmqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for MsmqTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         http::server::REQUEST
